@@ -1,110 +1,96 @@
 from flask import Flask, request, jsonify
-import numpy as np
 import pandas as pd
-import pickle
+import numpy as np
+import joblib
 
 app = Flask(__name__)
 
-# Load model, scaler, and feature names
-with open("heart_random_forest_model.pkl", "rb") as f:
-    model = pickle.load(f)
+# Load model, scaler, RFE selector, and all features used before RFE
+rfe = joblib.load("rfe_selector.pkl")
+all_features = joblib.load("all_features_before_rfe.pkl")  # complete feature list before RFE
+scaler = joblib.load("heart_scaler.pkl")
+model = joblib.load("heart_random_forest_model.pkl")
 
-with open("heart_scaler.pkl", "rb") as f:
-    scaler = pickle.load(f)
+# Transform input to match the training pipeline
+def transform_input(data):
+    df = pd.DataFrame([data])
 
-with open("feature_names.pkl", "rb") as f:
-    feature_names = pickle.load(f)
+    # Derived features
+    df['cholesterol_age_ratio'] = df['cholesterol'] / df['age']
+    df['heart_stress'] = df['resting_bp'] / df['depression'].replace(0, 1)  # avoid division by zero
 
-# Expected input features
+    # Age groups
+    df['age_group_middle'] = ((df['age'] >= 40) & (df['age'] < 55)).astype(int)
+    df['age_group_old'] = ((df['age'] >= 55) & (df['age'] < 65)).astype(int)
+    df['age_group_very_old'] = (df['age'] >= 65).astype(int)
+
+    # One-hot encoding for categorical fields
+    encoded = pd.DataFrame()
+
+    encoded['sex_male'] = [1 if df['sex'][0].lower() == 'male' else 0]
+
+    # Define categorical columns and their expected one-hot values
+    categories = {
+        'chest_pain_type': ['B', 'C', 'D', 'E'],
+        'fasting_blood_sugar': ['B', 'C', 'D', 'E'],
+        'resting_ecg': ['B', 'C', 'D', 'E'],
+        'exercise_angina': ['B', 'C', 'D', 'E'],
+        'slope': ['B', 'C', 'D', 'E'],
+        'major_vessels': ['B', 'C', 'D', 'E'],
+        'thal': ['B', 'C', 'D', 'E']
+    }
+
+    for col, options in categories.items():
+        val = df[col][0].upper()
+        for opt in options:
+            encoded[f"{col}_{opt}"] = [1 if val == opt else 0]
+
+    # Add numeric and derived columns
+    encoded['age'] = df['age']
+    encoded['resting_bp'] = df['resting_bp']
+    encoded['cholesterol'] = df['cholesterol']
+    encoded['max_heart_rate'] = df['max_heart_rate']
+    encoded['depression'] = df['depression']
+    encoded['cholesterol_age_ratio'] = df['cholesterol_age_ratio']
+    encoded['heart_stress'] = df['heart_stress']
+    encoded['age_group_middle'] = df['age_group_middle']
+    encoded['age_group_old'] = df['age_group_old']
+    encoded['age_group_very_old'] = df['age_group_very_old']
+
+    # Add missing columns with 0
+    for col in all_features:
+        if col not in encoded:
+            encoded[col] = 0
+
+    # Reorder the columns to match training order
+    encoded = encoded.reindex(columns=all_features)
+
+    # Scale and apply RFE
+    encoded_scaled = scaler.transform(encoded)
+    encoded_rfe = rfe.transform(encoded_scaled)
+
+    return encoded_rfe
+
+@app.route('/', methods=['GET'])
+def home():
+    return "Heart Disease Prediction API is running"
+
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
-        data = request.get_json()
+        user_input = request.get_json()
+        transformed = transform_input(user_input)
 
-        # Validate input
-        required_raw_fields = ["age", "sex", "cp", "trestbps", "chol", "fbs", "restecg",
-                               "thalach", "exang", "oldpeak", "slope", "ca", "thal"]
-        for field in required_raw_fields:
-            if field not in data:
-                return jsonify({
-                    "error": f"Missing required field: {field}",
-                    "required_fields": required_raw_fields
-                }), 400
+        pred = model.predict(transformed)[0]
+        prob = model.predict_proba(transformed)[0][int(pred)]
 
-        # Convert input to DataFrame
-        input_df = pd.DataFrame([data])
-
-        # Rename for consistency
-        input_df.rename(columns={
-            "trestbps": "resting_bp",
-            "chol": "cholesterol",
-            "thalach": "max_heart_rate",
-            "oldpeak": "depression"
-        }, inplace=True)
-
-        # Feature Engineering
-        input_df["cholesterol_age_ratio"] = input_df["cholesterol"] / input_df["age"]
-        input_df["heart_stress"] = input_df["max_heart_rate"] - input_df["resting_bp"]
-
-        age = input_df["age"].values[0]
-        if age < 40:
-            age_group = "young"
-        elif age < 55:
-            age_group = "middle"
-        elif age < 65:
-            age_group = "old"
-        else:
-            age_group = "very_old"
-        input_df[f"age_group_{age_group}"] = 1
-
-        # One-hot encoding
-        categorical_features = {
-            "sex": {1: "male", 0: "female"},
-            "cp": {0: "B", 1: "C", 2: "D", 3: "E"},
-            "fbs": {1: "A", 0: "B"},
-            "restecg": {0: "B", 1: "C", 2: "D"},
-            "exang": {1: "A", 0: "B"},
-            "slope": {0: "B", 1: "C", 2: "D"},
-            "ca": {0: "B", 1: "C", 2: "D", 3: "E"},
-            "thal": {0: "B", 1: "C", 2: "D", 3: "E"}
-        }
-
-        for feature, mapping in categorical_features.items():
-            value = data[feature]
-            mapped = mapping.get(value)
-            if mapped:
-                input_df[f"{feature}_{mapped}"] = 1
-
-        # Add missing columns to match training
-        for col in feature_names:
-            if col not in input_df.columns:
-                input_df[col] = 0
-
-        # Ensure correct order of columns
-        input_df = input_df[feature_names]
-
-        # Scale
-        input_scaled = scaler.transform(input_df)
-
-        # Predict
-        prediction = model.predict(input_scaled)[0]
-        probability = model.predict_proba(input_scaled)[0][int(prediction)]
-
-        result_text = "Positive for Heart Disease" if prediction == 1 else "Negative for Heart Disease"
         return jsonify({
-            "prediction": int(prediction),
-            "probability": round(probability, 2),
-            "result": result_text
+            "prediction": int(pred),
+            "probability": round(prob, 2),
+            "result": "Positive for Heart Disease" if pred == 1 else "Negative for Heart Disease"
         })
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@app.route('/', methods=['GET'])
-def index():
-    return "Heart Disease Prediction API is live!"
-
 
 if __name__ == '__main__':
     app.run(debug=True)
