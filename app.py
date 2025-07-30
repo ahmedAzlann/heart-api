@@ -79,7 +79,11 @@ def home():
 def predict():
     try:
         user_input = request.get_json()
+        print("Receieved data:",user_input)
         transformed = transform_input(user_input)
+
+        input_df = pd.DataFrame([user_input])
+        print("Input DataFrame:\n", input_df)  # 🟡 Debugging
 
         pred = model.predict(transformed)[0]
         prob = model.predict_proba(transformed)[0][int(pred)]
@@ -90,7 +94,9 @@ def predict():
             "result": "Positive for Heart Disease" if pred == 1 else "Negative for Heart Disease"
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print("🔴 Error occurred:", str(e))
+        return jsonify({"error": "Internal server error"}), 500
+    
 
 if __name__ == '__main__':
     app.run(debug=True)
