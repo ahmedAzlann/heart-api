@@ -16,7 +16,7 @@ def home():
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        data = request.get_json()
+        data = request.get_json(force=True)
 
         # Extract features in the correct order
         input_features = [data.get(feature) for feature in feature_names]
